@@ -91,6 +91,8 @@ public sealed class MainForm : Form
         _export.Enabled = true;
     }
 
+    internal SessionView? SessionForSmoke => _view;
+
     private void BuildInterface()
     {
         var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(22, 16, 22, 12), BackColor = BackgroundColor };

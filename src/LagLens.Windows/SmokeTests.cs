@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -79,6 +80,10 @@ internal static class SmokeTests
             var unsafeView = view with { Driver = new("<script>alert(1)</script>", "date", "provider", "file", "notes") };
             var escaped = File.ReadAllText(ReportExporter.Export(unsafeView, Path.Combine(output, "escape-check")));
             Check(!escaped.Contains("<script>", StringComparison.OrdinalIgnoreCase) && escaped.Contains("&lt;script&gt;"), "HTML escapes local metadata");
+            var missing = view.Rounds[0] with { Adapter = view.Rounds[0].Adapter with { Error = "Telemetry unavailable (test)", ReceiveErrors = -1 } };
+            var missingView = view with { Rounds = new[] { missing }.Concat(view.Rounds.Skip(1)).ToArray() };
+            var missingPath = ReportExporter.Export(missingView, Path.Combine(output, "telemetry-check"));
+            Check(File.ReadAllText(missingPath).Contains("Unavailable — inspect samples.csv") && File.ReadAllText(Path.Combine(output, "telemetry-check", "samples.csv")).Contains("Telemetry unavailable (test)"), "Unavailable telemetry cannot invent report counter changes");
         }
         if (adapters.FirstOrDefault(a => a.IsUp && a.Ipv4Address is not null) is { } active)
         {
@@ -125,6 +130,33 @@ internal static class SmokeTests
         File.WriteAllText(Path.Combine(output, "controls.json"), JsonSerializer.Serialize(controls, new JsonSerializerOptions { WriteIndented = true }));
         if (!controls.Any(c => c.Text == "Start test") || !controls.Any(c => c.type == "ChartControl")) throw new InvalidOperationException("Main UI controls are missing.");
         form.Close();
+        using var interactive = new MainForm();
+        interactive.Show();
+        Button ButtonNamed(string text) => Flatten(interactive).OfType<Button>().First(b => b.Text == text);
+        PumpUntil(() => ButtonNamed("Start test").Enabled, TimeSpan.FromSeconds(15), "Adapter discovery");
+        ButtonNamed("Start test").PerformClick();
+        PumpUntil(() => interactive.SessionForSmoke?.Rounds.Count >= 2, TimeSpan.FromSeconds(30), "GUI starting and recording");
+        ButtonNamed("Mark lag / stream drop").PerformClick();
+        PumpUntil(() => interactive.SessionForSmoke?.Markers.Count == 1, TimeSpan.FromSeconds(3), "GUI lag marker");
+        ButtonNamed("Stop").PerformClick();
+        PumpUntil(() => ButtonNamed("Start test").Enabled && ButtonNamed("Export report").Enabled, TimeSpan.FromSeconds(15), "GUI stop and export-ready state");
+        var saved = interactive.SessionForSmoke!;
+        if (saved.EndedAt is null || saved.StoragePath is null || !File.Exists(Path.Combine(saved.StoragePath, "report.html"))) throw new InvalidOperationException("GUI did not finalize its report.");
+        ReportExporter.Export(saved, Path.Combine(output, "gui-session"));
+        File.WriteAllText(Path.Combine(output, "gui-lifecycle.txt"), $"PASS GUI discovery, Start, {saved.Rounds.Count} rounds, Mark, Stop, automatic report and export\n");
+        interactive.Close();
+    }
+
+    private static void PumpUntil(Func<bool> condition, TimeSpan timeout, string operation)
+    {
+        var watch = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (watch.Elapsed > timeout) throw new TimeoutException(operation + " exceeded the smoke test timeout.");
+            Application.DoEvents();
+            Thread.Sleep(20);
+        }
+        Application.DoEvents();
     }
 
     private static IEnumerable<Control> Flatten(Control parent)
